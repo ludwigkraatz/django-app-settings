@@ -1,0 +1,2 @@
+django-app-settings
+===================
