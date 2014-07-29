@@ -2,6 +2,7 @@ import logging
 from django.conf import settings
 from django.utils.functional import LazyObject, empty
 from django.utils import importlib
+from .init import get_instance, get_wrapped_instance
 
 
 def perform_import(settings_name, val, setting_lookup):
@@ -13,21 +14,37 @@ def perform_import(settings_name, val, setting_lookup):
         return import_from_string(settings_name, val, setting_lookup)
     elif isinstance(val, (list, tuple)):
         return [import_from_string(settings_name, item, setting_lookup) for item in val]
+    elif isinstance(val, dict):
+        ret = {}
+        for key, value in val.items():
+            ret[key] = import_from_string(settings_name, value, setting_lookup)
+        val = ret
     return val
 
 
-def perform_init(settings_name, val, setting_lookup, init_method_location):
-    init_method = import_from_string(settings_name, init_method_location, setting_lookup, 'init')
+def perform_init(settings_name, val, setting_lookup, init_method):
+    #init_method = import_from_string(settings_name, init_method_location, setting_lookup, 'init')
     if not callable(init_method):
-        raise Exception('init method "%s" is not callable' % init_method_location)  # TODO: better class
+        raise Exception('init method "%s" is not callable' % init_method)  # TODO: better class
 
     if isinstance(val, (tuple, list)):
-        for value in val:
-            if not isinstance(value, SettingsWrapper):
-                return val
-    elif not isinstance(val, SettingsWrapper):
-        return val
+        ret = val.__class__()
 
+        for current_val in val:
+            if not isinstance(current_val, (basestring, dict, SettingsWrapper)):
+                return val
+            instance = init_method(current_val)
+            ret += val.__class__((instance, ))
+
+        return ret
+    elif isinstance(val, dict):
+        ret = {}
+        for key, value in val.items():
+            ret[key] = init_method(value)
+        val = ret
+
+    if not isinstance(val, (basestring, dict, SettingsWrapper)):
+        return val
     return init_method(val)
 
 
@@ -55,9 +72,10 @@ def import_from_string(settings_name, val, setting_lookup, scope=None):
 
 
 class SettingsWrapper(object):
-    def __init__(self, config, settings, available_settings=None, import_strings=None, validation_method=None,
+    def __init__(self, config=None, settings=None, available_settings=None, import_strings=None, validation_method=None,
                  one_to_many=None, parent_settings=None, defaults=None, configuration=None, lookup_path=None,
-                 links=None, init=None, upper_settings=None, **kwargs):
+                 links=None, init=None, upper_setting=None, global_settings=None,
+                 resolving_link=False, parent_setting=None, **kwargs):
         # **kwargs are important for compatibility and can be ignored
 
         self.__dict__['_config'] = config or {}
@@ -73,11 +91,16 @@ class SettingsWrapper(object):
         self.__dict__['_kwargs']['one_to_many'] = one_to_many or {}
         self.__dict__['_many_for_one'] = {}
         for key, value in self.__dict__['_kwargs']['one_to_many'].items():
-            self.__dict__['_many_for_one'][value] = key
+            target, filter = self.unpack_filter(value)
+            self.__dict__['_many_for_one'][target] = '|'.join((key, filter) if filter else (key, ))
 
         self.__dict__['_kwargs']['parent_settings'] = parent_settings or None  # is accessed with getattr()
         self.__dict__['_kwargs']['defaults'] = defaults or {}
-        self.__dict__['_kwargs']['upper_settings'] = upper_settings or self
+        self.__dict__['_kwargs']['global_settings'] = global_settings or []
+
+        self.__dict__['_kwargs']['upper_setting'] = upper_setting
+        self.__dict__['_kwargs']['resolving_link'] = resolving_link
+        self.__dict__['_kwargs']['parent_setting'] = parent_setting
 
         self.__dict__['_kwargs']['links'] = links or {}
         self.__dict__['_kwargs']['init'] = init or {}
@@ -86,14 +109,23 @@ class SettingsWrapper(object):
             configuration = configuration.as_dict()
         self.__dict__['_kwargs']['configuration'] = configuration or {}
 
+    def unpack_filter(self, value):
+        if value and '|' in value:
+            return value.split('|')
+        else:
+            return value, None
+
     def as_dict(self):
         return self.__dict__['_dict']
 
-    def deprecation_warning(self, attribute_name):
+    def deprecation_warning(self, attribute_name, message=None):
         pass  # TODO: implement deprecation warning for settings wrapper
 
     def get_active_configuration(self):
         return self.get_kwarg('configuration')
+
+    def link_resolved(self):
+        self.__dict__['_kwargs']['resolving_link'] = False
 
     def get_configuration_value(self, attribute_name):
         value = None
@@ -103,6 +135,8 @@ class SettingsWrapper(object):
         return value
 
     def get_value(self, attribute_name):
+        many_for_one_lookup, many_for_one_filter = self.unpack_filter(self.__dict__['_many_for_one'].get(attribute_name, None))
+        wrap_one_to_many = False
         value = self.get_configuration_value(attribute_name)
 
         if value is None:
@@ -111,74 +145,229 @@ class SettingsWrapper(object):
         if value is None and self.get_kwarg('parent_settings') is not None:
             value = getattr(self.get_kwarg('parent_settings'), attribute_name, None)
 
-        if value is None and attribute_name in self.get_kwarg('defaults'):
-            value = self.get_kwarg('defaults')[attribute_name]
+        if value is None and many_for_one_lookup:
+            value = self.get_value(many_for_one_lookup)
+            #value = self.__getattr__(many_for_one_lookup)
+            wrap_one_to_many = True
+
+        # wrap one into Collection/List
+        if wrap_one_to_many:
+            if many_for_one_filter:
+                ret = {}
+                if value:
+                    if many_for_one_filter not in value:
+                        raise Exception(many_for_one_filter, value)
+                    ret[value.get(many_for_one_filter)] = value
+                value = ret
+            elif not isinstance(value, (tuple, list)):
+                value = [value]
+
+        if many_for_one_lookup == 'DEPENDS_ON':
+            raise Exception(value)
+        # update defaults
+        if many_for_one_lookup and False:  # the following seems to be totally wrong. So skip it
+            default_value = self.get_kwarg('defaults').get(
+                many_for_one_lookup,
+            )
+
+            if default_value is not None:
+                if value is None:
+                    value = default_value
+                elif isinstance(value, (tuple, list)) and isinstance(default_value, (tuple, list)):
+                    value = default_value + value
+                elif isinstance(value, dict) and isinstance(default_value, dict) and (
+                    attribute_name.endswith('_COLLECTION') or (
+                        many_for_one_lookup and many_for_one_lookup.endswith('_COLLECTION')
+                    )
+                ):
+                    ret = {}
+                    for key, val in default_value.items():
+                        if isinstance(val, dict):
+                            if key in value and val.get('PROTECTED', False):
+                                raise Exception('protected DEFAULT Value "%s" can\'t be overwritten.' % (key))
+                        #TODO: else:
+                        ret[key] = val
+                    for key, val in value.items():
+                        ret[key] = val
+                    value = ret
+
+        else:
+            default_value = self.get_kwarg('defaults').get(
+                attribute_name
+            )
+
+            if default_value is not None:
+                if value is None:
+                    value = default_value
+                elif isinstance(value, dict) and isinstance(default_value, dict):
+                    ret = {}
+                    for key, val in default_value.items():
+                        if isinstance(val, dict):
+                            if key in value and val.get('_PROTECTED_'+key, False):
+                                raise Exception('protected DEFAULT Value "%s" can\'t be overwritten.' % (key))
+
+                        ret[key] = val
+                    for key, val in value.items():
+                        ret[key] = val
+                    value = ret
+
+        if value is None and attribute_name in self.list_globals():
+            if self.get_kwarg('parent_setting') and hasattr(self.get_kwarg('parent_setting'), attr):
+                value = getattr(self.get_kwarg('parent_setting'), attr)
+            elif self.get_kwarg('upper_setting') and hasattr(self.get_kwarg('upper_setting'), attr):
+                value = getattr(self.get_kwarg('upper_setting'), attr)
 
         return value
 
+    def list_available_attributes(self):
+        available_settings = {}
+
+        # TODO: self.get_absolute_lookup(settings_name=False) in self.get_kwargs('init'): append 'CLASS'/'_INIT_METHOD'
+        default_attributes = ['PROTECTED', 'CLASS']
+        default_attributes += self.list_globals()
+
+        for key, value in self.get_kwarg('available_settings').items():
+            available_settings[key] = value
+        for key in default_attributes:
+            available_settings[key] = None
+
+        return available_settings
+
+    def list_import_targets(self):
+        default_targets = ['_INIT_METHOD', 'CLASS']
+        return self.get_kwarg('import_strings') + default_targets
+
+    def list_globals(self):
+        default_globals = ['DEBUG', '_INIT_METHOD']
+        return self.get_kwarg('global_settings') + default_globals
+
+    def get_absolute_lookup(self, attribute_name, include_settings_name=True):
+        return (
+            (self.__dict__['_config'].get('NAME') + '.')
+            if include_settings_name else
+            '') + (
+                (self.get_kwarg('lookup_path') + '.')
+                if self.get_kwarg('lookup_path')
+                else ''
+            ) + attribute_name
+
     def __getattr__(self, name):
-        if name == '_parent':
-            return self.get_kwarg('upper_settings')
-        return self.get_attribute(name)
+        """
+            getattr method of settings wrapper has just one porpuse:
+            allow nested settings access
+            TODO: is this usefull?
+        """
+        settings = name.split('.')
+        obj = self
+        for setting_name in settings:
+            obj = obj.get_attribute(setting_name)
+        return obj
 
     def get_attribute(self, name, filter=None, filter_value=None):
-        # TODO: getattr('NESTED.SETTING')
-        many_for_one_lookup = self.__dict__['_many_for_one'].get(name, None)
-        if name not in self.get_kwarg('available_settings'):
-            self.raise_attribute_error(
+        # shortcuts
+        if name == '_PARENT':
+            return self.get_kwarg('parent_setting')
+        if name == '_INSTANCE':
+            return self._INIT_METHOD(self)
+
+        # test if requested attribute is available
+        available_attributes = self.list_available_attributes()
+        if name not in available_attributes:
+            self.raise_error(
+                AttributeError,
                 attribute_name=name
             )  # TODO: maybe raise SettingNotAvailable or similar
-        if ('_DEPRECATED_' + name) in self.get_kwarg('available_settings'):
-            self.deprecation_warning(name)
+        if ('_DEPRECATED_' + name) in available_attributes:
+            self.deprecation_warning(name, available_attributes['_DEPRECATED_' + name])
 
+        # get value
         value = self.get_value(name)
-        if value is None and many_for_one_lookup:
-            value = self.__getattr__(many_for_one_lookup)
+
+        # validate value  # TODO: do this when writing a configuration / loading settings
         if value is None:
-            self.raise_attribute_error(
+            self.raise_error(
                 attribute_name=name
             )
+        validation_method = None
+        if ('_VALIDATE_' + name) in self.__dict__['_dict']:
+            validation_method = perform_import(
+                self.get_absolute_lookup(name),
+                self.__dict__['_dict']['_VALIDATE_' + name],
+                '_VALIDATE_' + name
+            )
+        elif self.get_kwarg('validation_method') is not None:
+            validation_method = perform_import(
+                self.get_absolute_lookup(name),
+                self.get_kwarg('validation_method'),
+                'validation_method'
+            )
+        if validation_method is not None and False:  # TODO
+            if not validation_method(name, value):
+                self.raise_error(
+                    attribute_name=name
+                )  # TODO: maybe raise SettingsInvalid or similar
 
-        valid = None
-        if ('_VALIDATE_' + name) in self.get_kwarg('available_settings'):
-            valid = self.get_kwarg('available_settings')['_VALIDATE_' + name](name, value)
-        if valid is None and self.get_kwarg('validation_method') is not None:
-            valid = self.get_kwarg('validation_method')(name, value)
-
-        if valid is False:
-            self.raise_attribute_error(
-                attribute_name=name
-            )  # TODO: maybe raise SettingsInvalid or similar
-
+        # finalize the value: imports / init / ...
         value = self.finalize_value(name, value, filter, filter_value)
 
+        # cache for next access and return
         setattr(self, name, value)
         return value
 
     def get_filtered(self, attribute_name, filter, filter_value):
+        # TODO: getattr, because of nested attribute_name
+        if not isinstance(filter_value, basestring):
+            raise Exception(attribute_name, filter, filter_value.__dict__)
         return self.get_attribute(attribute_name, filter, filter_value)
 
     def finalize_value(self, attribute_name, value, filter, filter_value):
+        many_for_one_lookup, many_for_one_filter = self.unpack_filter(self.__dict__['_many_for_one'].get(attribute_name, None))
+
+        # handle links
         target = None
-        if attribute_name in self.get_kwarg('links'):
-            link = self.get_kwarg('links')[attribute_name]
-            target, filter = link.split('|')
+        link = self.get_kwarg('links').get(attribute_name, None) or self.get_kwarg('links').get(many_for_one_lookup, None)
+        if link and isinstance(value, (list, tuple, basestring)):
+            target, filter = self.unpack_filter(link)
 
             new_config = self.__dict__['_config']
-            link_target = app_settings(new_config).get_filtered(target, filter, value)
-            if link_target is None:
-                link_target = self.get_filtered(target, filter, value)
+            resolving_link_for = self  # no: self.get_kwarg('parent_setting') if self.get_kwarg('resolving_link') else
+            if isinstance(value, (list, tuple)):
+                link_target = value.__class__()
+                for temp_value in value:
+                    temp_target = app_settings(new_config, resolving_link_for=resolving_link_for).get_filtered(target, filter, temp_value)
+                    if not temp_target:
+                        temp_target = self.get_filtered(target, filter, temp_value)
+                    if not temp_target:
+                        raise Exception('LINK NOT VALID: "%s"' % link) # TODO: better Exception class
+                    temp_target.link_resolved()
+                    link_target += value.__class__([temp_target, ])
+            else:
+                link_target = app_settings(new_config, resolving_link_for=resolving_link_for).get_filtered(target, filter, value)
                 if link_target is None:
+                    link_target = self.get_filtered(target, filter, value)
+                if not link_target:
                     raise Exception('LINK NOT VALID: "%s"' % link) # TODO: better Exception class
+                link_target.link_resolved()
+
             value = link_target
+        # wrap child settings (but no collections!)
+        if (
+            attribute_name.endswith('_COLLECTION') or
+            (many_for_one_lookup and many_for_one_lookup.endswith('_COLLECTION'))
+        ):
+            if isinstance(value, dict):
+                ret = {}
+                for key, val in value.items():
+                    ret[key] = self.as_wrapped(
+                        attribute_name=(many_for_one_lookup or attribute_name),
+                        value=val
+                    )
+                value = ret
+        elif (
 
-        # the attribute_name might change because of an installed link
-        many_for_one_lookup = None
-        if attribute_name in self.__dict__['_many_for_one']:
-            many_for_one_lookup = self.__dict__['_many_for_one'][attribute_name]
-
-        if isinstance(self.get_kwarg('available_settings').get(attribute_name, None), dict) or (
-            many_for_one_lookup is not None and
+            isinstance(self.get_kwarg('available_settings').get(attribute_name, None), dict)
+        ) or (
+            many_for_one_lookup and
             isinstance(self.get_kwarg('available_settings').get(many_for_one_lookup, None), dict)
         ):
             if isinstance(value, (tuple, list)):
@@ -198,41 +387,48 @@ class SettingsWrapper(object):
                     value=value
                 )
 
-        if many_for_one_lookup is not None and not isinstance(value, (tuple, list)):
-            value = [value]
-
         # apply filter if needed
-        if isinstance(value, (list, tuple)) and filter:
-            for target in value:
-                if getattr(target, filter, None) == filter_value:
-                    value = target
-                    break
+        if filter_value:
+            matched = False
+            if isinstance(value, (list, tuple)) and value and filter:
+                for target in value:
+                    if getattr(target, filter, None) == filter_value:
+                        new_value = target
+                        matched = True
+                        break
+            elif isinstance(value, dict) and value:
+                new_value = value.get(filter_value, None)
+                matched = new_value is not None
+            if not matched:
+                raise Exception('filter "%s" not matched. found %s' % (filter_value, str(value)))
+            value = new_value
 
-        if attribute_name in self.get_kwarg('import_strings') and isinstance(attribute_name, basestring):
+        # import
+        if attribute_name in self.list_import_targets() and isinstance(attribute_name, basestring):  # Note: i think the isinstance check is useless and should be removed: TODO
             value = perform_import(
                 self.__dict__['_config'].get('NAME'),
                 value,
-                ((self.get_kwarg('lookup_path') + '.') if self.get_kwarg('lookup_path') else '') + attribute_name
+                self.get_absolute_lookup(attribute_name)
             )
 
+        # init
         for lookup in [attribute_name, many_for_one_lookup]:
             if lookup in self.get_kwarg('init'):
                 value = perform_init(
                     self.__dict__['_config'].get('NAME'),
                     value,
-                    ((self.get_kwarg('lookup_path') + '.') if self.get_kwarg('lookup_path') else '') + lookup,
-                    self.get_kwarg('init')[lookup]
+                    self.get_absolute_lookup(lookup),
+                    self._INIT_METHOD
                 )
                 break
 
         return value
 
-    def raise_attribute_error(self, **kwargs):
-        if 'settings_name' not in kwargs:
-            kwargs['settings_name'] = self.__dict__['_config'].get('NAME')
+    def raise_error(self, exception_class=Exception, **kwargs):
+        attribute_name = kwargs.pop('attribute_name')
         if 'lookup_path' not in kwargs:
-            kwargs['lookup_path'] = ('.' + self.get_kwarg('lookup_path')) if self.get_kwarg('lookup_path') else ''
-        raise Exception("Invalid '{settings_name}{lookup_path}' setting: '{attribute_name}'".format(**kwargs))
+            kwargs['lookup_path'] = self.get_absolute_lookup(attribute_name)
+        raise exception_class("Invalid setting '{lookup_path}'".format(**kwargs))
 
     def configure(self, configuration):
         # TODO: maybe need better configuration possibilities?
@@ -249,13 +445,18 @@ class SettingsWrapper(object):
     def get_wrapped_kwargs(self, **kwargs):
         attribute_name = kwargs.get('attribute_name', None)
         if attribute_name and attribute_name in self.__dict__['_many_for_one']:
-            attribute_name = self.__dict__['_many_for_one'].get(attribute_name)
+            attribute_name = self.unpack_filter(self.__dict__['_many_for_one'].get(attribute_name))[0]
         if attribute_name:
             kwargs['attribute_name'] = attribute_name
 
+        if 'value' in kwargs:
+            settings = kwargs.get('value')
+        else:
+            settings = self.__dict__['_dict'].get(attribute_name, None) if attribute_name else self.__dict__['_dict']
+
         new_kwargs = {
             'config': self.__dict__['_config'],
-            'settings': self.__dict__['_dict'].get(attribute_name, None) if attribute_name else self.__dict__['_dict'],
+            'settings': settings
         }
         for kwarg in self.__dict__['_kwargs'].keys():
             if kwarg not in ['config', 'settings']:
@@ -266,24 +467,24 @@ class SettingsWrapper(object):
     def wrap_own_kwargs(self, name, **kwargs):
         attribute_name = kwargs.get('attribute_name', None)
         #if attribute_name in self.get_kwarg('links'):
-        #    link = self.get_kwarg('links')[attribute_name].split('|')[0]
+        #    link = self.unpack_filter(self.get_kwarg('links')[attribute_name])[0]
         #    current_value = app_settings(self.__dict__['_config']).get_kwarg(link)
         #else:
         current_value = self.get_kwarg(name)
-        found = False
 
+        found = False
         if name in ['defaults', 'available_settings', 'configuration']:
             if attribute_name:
                 return current_value.get(attribute_name, None)
             found = True
-        elif name in ['import_strings']:
+        elif name in ['import_strings', 'init']:
             if attribute_name:
-                prefix = (attribute_name + '.') if attribute_name else None
+                prefix = attribute_name + '.'
                 return (string[len(prefix):] for string in current_value if string.startswith(prefix))
             found = True
-        elif name in ['one_to_many', 'links', 'init']:
+        elif name in ['one_to_many', 'links']:
             if attribute_name:
-                prefix = (attribute_name + '.') if attribute_name else None
+                prefix = (attribute_name + '.')
                 new_dict = {}
                 for key, value in current_value.items():
                     add = False
@@ -299,7 +500,7 @@ class SettingsWrapper(object):
 
                 return new_dict
             found = True
-        elif name == 'parent_settings':
+        elif name == 'parent_settings':# TODO: is this correct?
             if attribute_name:
                 return getattr(current_value, attribute_name, None)
             found = True
@@ -307,9 +508,17 @@ class SettingsWrapper(object):
             if attribute_name:
                 return ((current_value + '.') if current_value else '') + attribute_name
             found = True
-        elif name == 'upper_settings':
+        elif name == 'upper_setting':
             if attribute_name:
                 return self
+            found = True
+        elif name == 'parent_setting':
+            if attribute_name:
+                if self.get_kwarg('resolving_link'):
+                    return current_value
+                return self
+            found = True
+        elif name in ['global_settings']:
             found = True
 
         if found:
@@ -322,6 +531,12 @@ class SettingsWrapper(object):
 
     def get_wrapper_class(self):
         return SettingsWrapper
+
+    def __str__(self, ):
+        return 'SettingsWrapper: config=%s' % self.__dict__['_dict']
+
+    def __unicode__(self, ):
+        return self.__str__()
 
 """
 class ExampleSubclassWrapper(SettingsWrapper):
@@ -357,7 +572,7 @@ class ExampleSubclassWrapper(SettingsWrapper):
 """
 
 
-def app_settings(app_config, parent_settings=None, configuration=None):
+def app_settings(app_config, parent_settings=None, configuration=None, resolving_link_for=None):
     settings_name = app_config.get('NAME')
     if settings_name is None:
         raise Exception('app_config.NAME should be defined')
@@ -375,7 +590,10 @@ def app_settings(app_config, parent_settings=None, configuration=None):
         validation_method=app_config.get('VALIDATION_METHOD', None),
         links=app_config.get('LINK', None),
         init=app_config.get('INIT', None),
-        configuration=configuration
+        global_settings=app_config.get('GLOBALS'),
+        configuration=configuration,
+        parent_setting=resolving_link_for,
+        resolving_link=bool(resolving_link_for)
     )
 
     return wrapper
