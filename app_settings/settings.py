@@ -212,10 +212,10 @@ class SettingsWrapper(object):
                     value = ret
 
         if value is None and attribute_name in self.list_globals():
-            if self.get_kwarg('parent_setting') and hasattr(self.get_kwarg('parent_setting'), attr):
-                value = getattr(self.get_kwarg('parent_setting'), attr)
-            elif self.get_kwarg('upper_setting') and hasattr(self.get_kwarg('upper_setting'), attr):
-                value = getattr(self.get_kwarg('upper_setting'), attr)
+            if self.get_kwarg('parent_setting') and hasattr(self.get_kwarg('parent_setting'), attribute_name):
+                value = getattr(self.get_kwarg('parent_setting'), attribute_name)
+            elif self.get_kwarg('upper_setting') and hasattr(self.get_kwarg('upper_setting'), attribute_name):
+                value = getattr(self.get_kwarg('upper_setting'), attribute_name)
 
         return value
 
