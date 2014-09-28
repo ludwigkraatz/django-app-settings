@@ -535,6 +535,9 @@ class SettingsWrapper(object):
     def __str__(self, ):
         return 'SettingsWrapper: config=%s' % self.__dict__['_dict']
 
+    def __hash__(self):
+        return hash(str(self.__dict__['_dict']))  # TODO: find better hash source
+
     def __unicode__(self, ):
         return self.__str__()
 
