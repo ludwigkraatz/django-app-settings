@@ -10,6 +10,8 @@ def perform_import(settings_name, val, setting_lookup):
     If the given setting is a string import notation,
     then perform the necessary import or imports.
     """
+    if not val:
+        return None
     if isinstance(val, basestring):
         return import_from_string(settings_name, val, setting_lookup)
     elif isinstance(val, (list, tuple)):
