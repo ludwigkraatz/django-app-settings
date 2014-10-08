@@ -67,6 +67,14 @@ class ClassWrapper(object):
                     attr
                 ))
 
+    def __eq__(self, other):
+        if isinstance(other, self.__class__):
+            return self.__dict__['__instance'] == other.__dict__['__instance']
+        return self.__instance == other
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
     def __getattr__(self, attr):
         # at least one of te two following is always None
         config_value = getattr(self.__config, attr, None)
