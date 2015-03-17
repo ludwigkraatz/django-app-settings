@@ -3,7 +3,7 @@ from django.conf import settings
 from django.utils.functional import LazyObject, empty
 from django.utils import importlib
 from .init import get_instance, get_wrapped_instance
-
+from .exceptions import InvalidSettingError
 
 def perform_import(settings_name, val, setting_lookup):
     """
@@ -426,7 +426,7 @@ class SettingsWrapper(object):
 
         return value
 
-    def raise_error(self, exception_class=Exception, **kwargs):
+    def raise_error(self, exception_class=InvalidSettingError, **kwargs):
         attribute_name = kwargs.pop('attribute_name')
         if 'lookup_path' not in kwargs:
             kwargs['lookup_path'] = self.get_absolute_lookup(attribute_name)
