@@ -45,7 +45,7 @@ def perform_init(settings_name, val, setting_lookup, init_method):
             ret[key] = init_method(value)
         val = ret
 
-    if not isinstance(val, (basestring, dict, SettingsWrapper)):
+    if not isinstance(val, (SettingsWrapper)):
         return val
     return init_method(val)
 
