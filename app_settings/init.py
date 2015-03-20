@@ -14,7 +14,7 @@ def get_instance(config):
         raise Exception('config "%s" should be a SettingsWrapper with "CLASS" attribute not "%s" instance' % (
             str(config),
             str(config.__class__)
-        )
+        ))
     instance_class = config.CLASS
     hash_value = hash((instance_class, config))
     instance = storage_instance(hash_value)
