@@ -4,6 +4,8 @@ from django.utils.functional import LazyObject, empty
 from django.utils import importlib
 from .init import get_instance, get_wrapped_instance
 from .exceptions import InvalidSettingError
+from .utils import dict_merge
+
 
 def perform_import(settings_name, val, setting_lookup):
     """
@@ -153,71 +155,54 @@ class SettingsWrapper(object):
             wrap_one_to_many = True
 
         # wrap one into Collection/List
-        if wrap_one_to_many:
-            if many_for_one_filter:
-                ret = {}
-                if value:
-                    if many_for_one_filter not in value:
-                        raise Exception(many_for_one_filter, value)
-                    ret[value.get(many_for_one_filter)] = value
-                value = ret
-            elif not isinstance(value, (tuple, list)):
-                value = [value]
+        try:
+            if wrap_one_to_many:
+                if many_for_one_filter:
+                    ret = {}
+                    if value:
+                        if many_for_one_filter not in value:
+                            raise InvalidSettingError(many_for_one_filter, value)
+                        ret[value.get(many_for_one_filter)] = value
+                    value = ret
+                elif not isinstance(value, (tuple, list)):
+                    value = [value]
+        except InvalidSettingError:
+            value = None  # this means, its a default value thats not relevant here
 
         if many_for_one_lookup == 'DEPENDS_ON':
             raise Exception(value)
         # update defaults
-        if many_for_one_lookup and False:  # the following seems to be totally wrong. So skip it
-            default_value = self.get_kwarg('defaults').get(
-                many_for_one_lookup,
-            )
 
-            if default_value is not None:
-                if value is None:
-                    value = default_value
-                elif isinstance(value, (tuple, list)) and isinstance(default_value, (tuple, list)):
-                    value = default_value + value
-                elif isinstance(value, dict) and isinstance(default_value, dict) and (
-                    attribute_name.endswith('_COLLECTION') or (
-                        many_for_one_lookup and many_for_one_lookup.endswith('_COLLECTION')
-                    )
-                ):
-                    ret = {}
-                    for key, val in default_value.items():
-                        if isinstance(val, dict):
-                            if key in value and val.get('PROTECTED', False):
-                                raise Exception('protected DEFAULT Value "%s" can\'t be overwritten.' % (key))
-                        #TODO: else:
-                        ret[key] = val
-                    for key, val in value.items():
-                        ret[key] = val
-                    value = ret
+        if True:
+            parent_value = None
+            if value is None and attribute_name in self.list_globals():
+                if self.get_kwarg('parent_setting') and hasattr(self.get_kwarg('parent_setting'), attribute_name):
+                    parent_value = getattr(self.get_kwarg('parent_setting'), attribute_name)
+                elif self.get_kwarg('upper_setting') and hasattr(self.get_kwarg('upper_setting'), attribute_name):
+                    parent_value = getattr(self.get_kwarg('upper_setting'), attribute_name)
 
-        else:
-            default_value = self.get_kwarg('defaults').get(
+            default = self.get_kwarg('defaults').get(
                 attribute_name
             )
 
-            if default_value is not None:
-                if value is None:
-                    value = default_value
-                elif isinstance(value, dict) and isinstance(default_value, dict):
-                    ret = {}
-                    for key, val in default_value.items():
-                        if isinstance(val, dict):
-                            if key in value and val.get('_PROTECTED_'+key, False):
-                                raise Exception('protected DEFAULT Value "%s" can\'t be overwritten.' % (key))
+            for default_value in [parent_value or default, ]:
+                if default_value is not None:
+                    if isinstance(value, dict) and isinstance(default_value, dict):
+                        ret = {}
+                        for key, val in default_value.items():
+                            if isinstance(val, dict):
+                                if key in value and val.get('_PROTECTED_'+key, False):
+                                    raise Exception('protected DEFAULT Value "%s" can\'t be overwritten.' % (key))
 
-                        ret[key] = val
-                    for key, val in value.items():
-                        ret[key] = val
-                    value = ret
+                                if key in value and val.get('PROTECTED', False) and any(v in value[key] for v in val.keys() if v != many_for_one_filter):
+                                    raise Exception('protected DEFAULT setting item "%s" can\'t be overwritten.' % (key))
 
-        if value is None and attribute_name in self.list_globals():
-            if self.get_kwarg('parent_setting') and hasattr(self.get_kwarg('parent_setting'), attribute_name):
-                value = getattr(self.get_kwarg('parent_setting'), attribute_name)
-            elif self.get_kwarg('upper_setting') and hasattr(self.get_kwarg('upper_setting'), attribute_name):
-                value = getattr(self.get_kwarg('upper_setting'), attribute_name)
+                            ret[key] = val
+                        for key, val in value.items():
+                            ret[key] = dict_merge(ret.get(key, {}), val)
+                        value = ret
+            if value is None:
+                value = parent_value or default
 
         return value
 

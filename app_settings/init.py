@@ -10,6 +10,11 @@ def storage_instance(hash_value, instance=None):
 
 
 def get_instance(config):
+    if not hasattr(config, 'CLASS'):
+        raise Exception('config "%s" should be a SettingsWrapper with "CLASS" attribute not "%s" instance' % (
+            str(config),
+            str(config.__class__)
+        )
     instance_class = config.CLASS
     hash_value = hash((instance_class, config))
     instance = storage_instance(hash_value)
@@ -59,8 +64,7 @@ class ClassWrapper(object):
         self.__config = config
 
         for attr in self.__config.__dict__['_dict'].keys():
-            instance_value = getattr(self.__instance, attr, None)
-            if instance_value is not None:
+            if hasattr(self.__instance, attr):
                 raise Exception('can\'t wrap class"%s" with this config. \
                     Attribute "%s" found in both.' % (
                     str(instance.__class__),
@@ -69,7 +73,7 @@ class ClassWrapper(object):
 
     def __eq__(self, other):
         if isinstance(other, self.__class__):
-            return self.__dict__['__instance'] == other.__dict__['__instance']
+            return self.__instance == other.__instance
         return self.__instance == other
 
     def __ne__(self, other):
