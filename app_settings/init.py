@@ -58,6 +58,10 @@ def wrap_class_with_config(config):
     return instance
 
 
+class Empty(object):
+    pass
+
+
 class ClassWrapper(object):
     def __init__(self, instance, config):
         self.__instance = instance
@@ -81,11 +85,13 @@ class ClassWrapper(object):
 
     def __getattr__(self, attr):
         # at least one of te two following is always None
-        config_value = getattr(self.__config, attr, None)
-        instance_value = getattr(self.__instance, attr, None)
+        config_value = getattr(self.__config, attr, Empty)
+        instance_value = getattr(self.__instance, attr, Empty)
 
-        if config_value or instance_value:
-            return config_value or instance_value
+        if config_value is not Empty:
+            return config_value
+        if instance_value is not Empty:
+            return instance_value
         raise AttributeError('Attribute "%s" not found in config/instance' % attr)
 
     def __str__(self, ):
