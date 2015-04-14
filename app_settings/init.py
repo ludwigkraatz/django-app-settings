@@ -10,7 +10,7 @@ def storage_instance(hash_value, instance=None):
 
 
 def get_instance(config):
-    if not hasattr(config, 'CLASS'):
+    if getattr(config, 'CLASS', None) is None:
         raise Exception('config "%s" should be a SettingsWrapper with "CLASS" attribute not "%s" instance' % (
             str(config),
             str(config.__class__)

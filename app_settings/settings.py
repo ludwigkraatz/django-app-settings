@@ -81,7 +81,6 @@ class SettingsWrapper(object):
                  links=None, init=None, upper_setting=None, global_settings=None,
                  resolving_link=False, parent_setting=None, **kwargs):
         # **kwargs are important for compatibility and can be ignored
-
         self.__dict__['_config'] = config or {}
 
         self.__dict__['_dict'] = settings or {}
