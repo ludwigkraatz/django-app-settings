@@ -75,6 +75,22 @@ def import_from_string(settings_name, val, setting_lookup, scope=None):
         raise ImportError(msg)
 
 
+class SettingsHolder(object):
+    def __init__(self, wrapped):
+        self.__wrapped = wrapped
+
+    @property
+    def _wrapped(self):
+        return self.__wrapped
+
+    @_wrapped.setter
+    def _wrapped(self, wrapped):
+        self.__wrapped = wrapped
+
+    def __getattr__(self, name):
+        return getattr(self._wrapped, name)
+
+
 class SettingsWrapper(object):
     def __init__(self, config=None, settings=None, available_settings=None, import_strings=None, validation_method=None,
                  one_to_many=None, parent_settings=None, defaults=None, configuration=None, lookup_path=None,
@@ -108,9 +124,9 @@ class SettingsWrapper(object):
         self.__dict__['_kwargs']['links'] = links or {}
         self.__dict__['_kwargs']['init'] = init or {}
 
-        if isinstance(configuration, SettingsWrapper):
-            configuration = configuration.as_dict()
-        self.__dict__['_kwargs']['configuration'] = configuration or {}
+        self.__dict__['_kwargs']['configuration'] = None
+        if configuration:
+            self.configure(configuration)
 
     def unpack_filter(self, value):
         if value and '|' in value:
@@ -134,13 +150,42 @@ class SettingsWrapper(object):
         value = None
         configuration = self.get_active_configuration()
         if configuration is not None:
-            value = configuration.get(attribute_name, None)
+            value = configuration.get(attribute_name, configuration['.'].get(attribute_name, None))
+        return value
+
+    def get_configuration(self, attribute_name=None, lookup_value=None, many_for_one_filter=None):
+        value = None
+        configuration = self.get_active_configuration()
+        if configuration is not None:
+            value = {'.': configuration['.']}
+            found = False
+            if attribute_name and attribute_name in configuration:
+                found = True
+                value.update(configuration.get(attribute_name, {}))
+            if isinstance(lookup_value, dict) and many_for_one_filter in lookup_value:
+                # this should handle COLLECTION[{'MANY_TO_MANY_FILTER': 'real_lookup_value', ...}['MAN..']]
+                real_lookup_value = lookup_value.get(many_for_one_filter)
+                found = True
+                if real_lookup_value not in configuration and (attribute_name + '_COLLECTION') in configuration:
+                    _conf = configuration[attribute_name + '_COLLECTION']
+                else:
+                    _conf = configuration
+                if real_lookup_value in _conf:
+                    value.update(_conf.get(real_lookup_value, {}))
+            elif isinstance(lookup_value, basestring) and lookup_value in configuration:
+                # this should handle COLLECTION[lookup_value]
+                found = True
+                value.update(configuration.get(lookup_value, {}))
+            if not found:
+                value.update(configuration['.'])
         return value
 
     def get_value(self, attribute_name):
         many_for_one_lookup, many_for_one_filter = self.unpack_filter(self.__dict__['_many_for_one'].get(attribute_name, None))
         wrap_one_to_many = False
         value = self.get_configuration_value(attribute_name)
+        if isinstance(value, dict):
+            value = None
 
         if value is None:
             value = self.__dict__['_dict'].get(attribute_name, None)
@@ -161,7 +206,9 @@ class SettingsWrapper(object):
                     if value:
                         if many_for_one_filter not in value:
                             raise InvalidSettingError(many_for_one_filter, value)
-                        ret[value.get(many_for_one_filter)] = value
+                        value_lookup = value.get(many_for_one_filter)
+                        value.update(self.get_configuration(value_lookup) or {})
+                        ret[value_lookup] = value
                     value = ret
                 elif not isinstance(value, (tuple, list)):
                     value = [value]
@@ -308,6 +355,13 @@ class SettingsWrapper(object):
 
     def finalize_value(self, attribute_name, value, filter, filter_value):
         many_for_one_lookup, many_for_one_filter = self.unpack_filter(self.__dict__['_many_for_one'].get(attribute_name, None))
+        configuration = (self.get_active_configuration() or {'.': None}).get('.')
+        if many_for_one_filter:
+            conf = self.get_configuration(many_for_one_filter=many_for_one_filter)
+            if conf and not isinstance(configuration, dict):
+                configuration = conf
+            elif conf:
+                configuration.update(conf)
 
         # handle links
         target = None
@@ -320,7 +374,12 @@ class SettingsWrapper(object):
             if isinstance(value, (list, tuple)):
                 link_target = value.__class__()
                 for temp_value in value:
-                    temp_target = app_settings(new_config, resolving_link_for=resolving_link_for).get_filtered(target, filter, temp_value)
+                    temp_target = app_settings(
+                        new_config,
+                        resolving_link_for=resolving_link_for,
+                        configuration=configuration,
+                        in_holder=False
+                    ).get_filtered(target, filter, temp_value)
                     if not temp_target:
                         temp_target = self.get_filtered(target, filter, temp_value)
                     if not temp_target:
@@ -328,7 +387,12 @@ class SettingsWrapper(object):
                     temp_target.link_resolved()
                     link_target += value.__class__([temp_target, ])
             else:
-                link_target = app_settings(new_config, resolving_link_for=resolving_link_for).get_filtered(target, filter, value)
+                link_target = app_settings(
+                    new_config,
+                    resolving_link_for=resolving_link_for,
+                    configuration=configuration,
+                    in_holder=False
+                ).get_filtered(target, filter, value)
                 if link_target is None:
                     link_target = self.get_filtered(target, filter, value)
                 if not link_target:
@@ -346,7 +410,8 @@ class SettingsWrapper(object):
                 for key, val in value.items():
                     ret[key] = self.as_wrapped(
                         attribute_name=(many_for_one_lookup or attribute_name),
-                        value=val
+                        value=val,
+                        many_for_one_filter=many_for_one_filter
                     )
                 value = ret
         elif (
@@ -363,14 +428,16 @@ class SettingsWrapper(object):
                         new_value += value.__class__(
                             (self.as_wrapped(
                                 attribute_name=(many_for_one_lookup or attribute_name),
-                                value=val
+                                value=val,
+                                many_for_one_filter=many_for_one_filter
                             ), )
                         )
                     value = new_value
             elif not isinstance(value, SettingsWrapper):
                 value = self.as_wrapped(
                     attribute_name=attribute_name,
-                    value=value
+                    value=value,
+                    many_for_one_filter=many_for_one_filter
                 )
 
         # apply filter if needed
@@ -417,8 +484,19 @@ class SettingsWrapper(object):
         raise exception_class("Invalid setting '{lookup_path}'".format(**kwargs))
 
     def configure(self, configuration):
-        # TODO: maybe need better configuration possibilities?
-        self.get_kwarg('configuration').update(configuration)
+        _configuration = self.get_active_configuration()
+        if _configuration is None:
+            self.__dict__['_kwargs']['configuration'] = {'.': {}}
+            _configuration = self.__dict__['_kwargs']['configuration']
+
+        if isinstance(configuration, SettingsWrapper):
+            configuration = configuration.as_dict()
+
+        if '.' in configuration:
+            _configuration['.'] = configuration['.']
+        else:
+            configuration['.'] = configuration
+        _configuration.update(configuration)
 
     def with_configuration(self, configuration):
         new_wrapper = self.as_wrapped()
@@ -452,6 +530,8 @@ class SettingsWrapper(object):
 
     def wrap_own_kwargs(self, name, **kwargs):
         attribute_name = kwargs.get('attribute_name', None)
+        value = kwargs.get('value', None)
+        many_for_one_filter = kwargs.get('many_for_one_filter', None)
         #if attribute_name in self.get_kwarg('links'):
         #    link = self.unpack_filter(self.get_kwarg('links')[attribute_name])[0]
         #    current_value = app_settings(self.__dict__['_config']).get_kwarg(link)
@@ -460,7 +540,9 @@ class SettingsWrapper(object):
 
         found = False
         if name in ['defaults', 'available_settings', 'configuration']:
-            if attribute_name:
+            if name == 'configuration':
+                current_value = self.get_configuration(attribute_name, lookup_value=value, many_for_one_filter=many_for_one_filter)
+            elif attribute_name:
                 return current_value.get(attribute_name, None)
             found = True
         elif name in ['import_strings', 'init']:
@@ -561,21 +643,36 @@ class ExampleSubclassWrapper(SettingsWrapper):
 """
 
 
-def app_settings(app_config, parent_settings=None, configuration=None, resolving_link_for=None):
+def app_settings(app_config, parent_settings=None, configuration=None, resolving_link_for=None, in_holder=True):
     settings_name = app_config.get('NAME')
     if settings_name is None:
         raise Exception('app_config.NAME should be defined')
 
     # TODO: check, that nothing insinde IMPORT_SETTINGS is represened by a dict in SETTINGS
 
-    wrapper = SettingsWrapper(
+    app_settings = getattr(settings, settings_name, None)
+    one_to_many = app_config.get('ONE_TO_MANY', None)
+    if one_to_many:
+        _configuration = {}
+        for key in one_to_many:
+            if '.' in key:
+                continue
+            if not key in app_settings:
+                continue
+
+            _configuration[key] = app_settings[key]
+        if configuration:
+            _configuration.update(configuration)
+        configuration = _configuration
+
+    wrapped = SettingsWrapper(
         config=app_config,
-        settings=getattr(settings, settings_name, None),
+        settings=app_settings,
         parent_settings=parent_settings,
         available_settings=app_config.get('SETTINGS', None),
         defaults=app_config.get('DEFAULTS', None),
         import_strings=app_config.get('IMPORT_STRINGS', None),
-        one_to_many=app_config.get('ONE_TO_MANY', None),
+        one_to_many=one_to_many,
         validation_method=app_config.get('VALIDATION_METHOD', None),
         links=app_config.get('LINK', None),
         init=app_config.get('INIT', None),
@@ -584,5 +681,9 @@ def app_settings(app_config, parent_settings=None, configuration=None, resolving
         parent_setting=resolving_link_for,
         resolving_link=bool(resolving_link_for)
     )
+    if not in_holder:
+        return wrapped
+
+    wrapper = SettingsHolder(wrapped)
 
     return wrapper
