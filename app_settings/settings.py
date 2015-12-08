@@ -1,6 +1,4 @@
 import logging
-from django.conf import settings
-from django.utils.functional import LazyObject, empty
 from django.utils import importlib
 from .init import get_instance, get_wrapped_instance
 from .exceptions import InvalidSettingError
@@ -650,7 +648,12 @@ def app_settings(app_config, parent_settings=None, configuration=None, resolving
 
     # TODO: check, that nothing insinde IMPORT_SETTINGS is represened by a dict in SETTINGS
 
-    app_settings = getattr(settings, settings_name, None)
+    try:
+        from django.conf import settings
+        app_settings = getattr(settings, settings_name, None)
+    except ImportError:
+        app_settings = None
+
     one_to_many = app_config.get('ONE_TO_MANY', None)
     if one_to_many:
         _configuration = {}
