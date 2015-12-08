@@ -238,7 +238,7 @@ class SettingsWrapper(object):
                                 if key in value and val.get('_PROTECTED_'+key, False):
                                     raise Exception('protected DEFAULT Value "%s" can\'t be overwritten.' % (key))
 
-                                if key in value and val.get('PROTECTED', False) and any(v in value[key] for v in val.keys() if v != many_for_one_filter):
+                                if key in value and val.get('PROTECTED', False) and any(v in value[key] and value[key] != val[v] for v in val.keys() if v != many_for_one_filter):
                                     raise Exception('protected DEFAULT setting item "%s" can\'t be overwritten.' % (key))
 
                             ret[key] = val
